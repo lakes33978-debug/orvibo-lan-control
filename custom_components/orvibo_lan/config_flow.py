@@ -206,7 +206,8 @@ class OrviboLanConfigFlow(  # type: ignore[call-arg]
                     if not await self._probe_gateway_login(gateway_ips):
                         return self.async_abort(reason="auth_failed")
         if not self._devices and not errors:
-            errors["base"] = "no_devices"
+            # 家庭下没有可接入的设备：直接中止，不进入设备选择
+            return self.async_abort(reason="no_devices")
         if user_input is not None and CONF_SELECTED_DEVICE_IDS in user_input:
             selected = _validated_selection(user_input[CONF_SELECTED_DEVICE_IDS], self._devices)
             if selected:
@@ -353,7 +354,7 @@ class OrviboLanOptionsFlow(config_entries.OptionsFlow):
             except CloudClientError:
                 errors["base"] = "cannot_connect"
         if not self._devices and not errors:
-            errors["base"] = "no_devices"
+            return self.async_abort(reason="no_devices")
         if user_input is not None and CONF_SELECTED_DEVICE_IDS in user_input:
             selected = _validated_selection(user_input[CONF_SELECTED_DEVICE_IDS], self._devices)
             if selected:

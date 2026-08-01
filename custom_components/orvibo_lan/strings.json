@@ -38,6 +38,8 @@
     },
     "abort": {
       "already_configured": "This account is already configured.",
+      "auth_failed": "Authentication failed.",
+      "no_devices": "No supported devices were found.",
       "reauth_entry_missing": "The config entry no longer exists.",
       "reauth_successful": "Reauthentication was successful."
     }
@@ -56,6 +58,9 @@
       "cannot_connect": "Unable to connect to ORVIBO.",
       "no_devices": "No supported devices were found.",
       "no_devices_selected": "Select at least one device."
+    },
+    "abort": {
+      "no_devices": "No supported devices were found."
     }
   }
 }
