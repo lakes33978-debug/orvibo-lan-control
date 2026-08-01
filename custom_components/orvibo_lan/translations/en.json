@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "ORVIBO LAN Control",
+        "title": "ORVIBO LAN",
         "description": "Enter your Orvibo account (phone number)",
         "data": {
           "username": "Phone Number",
@@ -18,7 +18,7 @@
       },
       "devices": {
         "title": "Select Devices",
-        "description": "Select devices to control via LAN (all selected by default)",
+        "description": "Select devices to add (LAN child devices are controllable; property devices may be read-only; all selected by default)",
         "data": {
           "selected_device_ids": "Select Devices"
         }
@@ -39,14 +39,14 @@
     "step": {
       "devices": {
         "title": "Select Devices",
-        "description": "Select devices to control via LAN",
+        "description": "Select LAN or property-based read-only devices to add",
         "data": {
           "selected_device_ids": "Select Devices"
         }
       },
       "init": {
         "title": "Select Devices",
-        "description": "Select devices to control via LAN",
+        "description": "Select LAN or property-based read-only devices to add",
         "data": {
           "selected_device_ids": "Select Devices"
         }

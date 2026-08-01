@@ -3,31 +3,26 @@
 - 旧协议 (statusType=2): value1=onoff, value2=亮度, value3=色温(mired), order="on"/"fast color temperature"
 - ThingModel (statusType=501/502/503): properties.onoff/brightness/colorTemp, order="set property"
 """
+
 import logging
-from typing import Any, Optional
+from collections.abc import Mapping
+from typing import Optional
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import OrviboLanCoordinator
+from .device_profiles import (
+    light_color_mode,
+    supports_platform,
+    verified_profile_name,
+)
+from .entity import OrviboLanEntity
 from .lib import device_control as dc
 
 _LOGGER = logging.getLogger(__name__)
-
-# 设备类型 → 支持的 color_mode（字符串标记，运行时替换为 ColorMode 常量）
-TYPE_COLOR_MODE_MAP = {
-    38: "color_temp",          # 调光调色灯 (ZCL)
-    102: "onoff",
-    501: "onoff",              # ThingModel 开关
-    502: "brightness",         # ThingModel 可调光
-    503: "color_temp",         # ThingModel 色温灯带
-    0: "brightness",           # 旧协议调光灯
-    1: "color_temp",           # 旧协议色温灯
-    2: "onoff",
-}
 
 # 色温上限/下限（开尔文）
 COLOR_TEMP_RANGE = {
@@ -37,12 +32,13 @@ COLOR_TEMP_RANGE = {
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
+    hass: HomeAssistant,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-):
-    from homeassistant.components.light import LightEntity, ColorMode
+) -> None:
+    from homeassistant.components.light import ColorMode, LightEntity
 
-    class OrviboLanLight(CoordinatorEntity, LightEntity):
+    class OrviboLanLight(OrviboLanEntity, LightEntity):
         _attr_has_entity_name = True
 
         def __init__(self, coordinator, device_id, device, device_type):
@@ -50,6 +46,7 @@ async def async_setup_entry(
             self._device_id = device_id
             self._device = device
             self._device_type = device_type
+            self._profile_name = verified_profile_name(device)
 
             name = device.get("deviceName", f"Light {device_id[:8]}")
             self._attr_unique_id = f"{DOMAIN}_light_{device_id}"
@@ -62,13 +59,12 @@ async def async_setup_entry(
                 "name": device.get("deviceName", f"Light {device_id[:8]}"),
                 "manufacturer": MANUFACTURER,
                 "model": "Orvibo Light",
-                "sw_version": "1.0",
             }
-            if uid:
+            if uid and device.get("_orvibo_lan_capable"):
                 dev_info["via_device"] = (DOMAIN, f"gateway_{uid}")
             self._attr_device_info = dev_info
 
-            cm_str = TYPE_COLOR_MODE_MAP.get(self._device_type, "onoff")
+            cm_str = light_color_mode(device)
             if cm_str == "color_temp":
                 self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
                 self._attr_color_mode = ColorMode.COLOR_TEMP
@@ -100,7 +96,7 @@ async def async_setup_entry(
             if self._is_thingmodel():
                 props = st.get("properties", {}) or {}
                 onoff = props.get("onoff", {})
-                if isinstance(onoff, dict):
+                if isinstance(onoff, Mapping):
                     return onoff.get("status") == "on"
                 return False
             # 旧协议: value1=0 开, value1=1 关
@@ -117,7 +113,7 @@ async def async_setup_entry(
             if self._is_thingmodel():
                 props = st.get("properties", {}) or {}
                 bri_obj = props.get("brightness", {})
-                if isinstance(bri_obj, dict):
+                if isinstance(bri_obj, Mapping):
                     pct = bri_obj.get("percent")
                     if pct is not None:
                         return int(pct) * 255 // 100
@@ -137,7 +133,7 @@ async def async_setup_entry(
             if self._is_thingmodel() and self._device_type == 503:
                 props = st.get("properties", {}) or {}
                 ct_obj = props.get("colorTemp", {})
-                if isinstance(ct_obj, dict):
+                if isinstance(ct_obj, Mapping):
                     kelvin = ct_obj.get("value")
                     if kelvin:
                         return int(kelvin)
@@ -170,10 +166,21 @@ async def async_setup_entry(
 
             uid = self._device.get("uid", "")
 
+            if self._profile_name == "power_only_light":
+                payload = dc.power_only_light(
+                    self._device_id,
+                    uid,
+                    True,
+                    self.coordinator.username,
+                )
+                await self.coordinator.async_control_device(self._device_id, payload)
+                return
+
             if brightness_ha is not None and ct_kelvin is not None:
                 # 同时设置亮度和色温 → 用 order="on" 一次性下发
                 payload = dc.light_on_off(
-                    self._device_id, uid,
+                    self._device_id,
+                    uid,
                     self._device_type,
                     True,  # power on
                     brightness=brightness_ha,
@@ -182,7 +189,8 @@ async def async_setup_entry(
                 )
             elif brightness_ha is not None:
                 payload = dc.light_brightness(
-                    self._device_id, uid,
+                    self._device_id,
+                    uid,
                     self._device_type,
                     brightness_ha,
                     self.coordinator.username,
@@ -190,7 +198,8 @@ async def async_setup_entry(
             elif ct_kelvin is not None:
                 current_brightness = self.brightness or 255
                 payload = dc.light_colortemp(
-                    self._device_id, uid,
+                    self._device_id,
+                    uid,
                     self._device_type,
                     ct_kelvin,
                     brightness=current_brightness,
@@ -198,7 +207,8 @@ async def async_setup_entry(
                 )
             else:
                 payload = dc.light_on(
-                    self._device_id, uid,
+                    self._device_id,
+                    uid,
                     self._device_type,
                     self.coordinator.username,
                 )
@@ -207,15 +217,27 @@ async def async_setup_entry(
 
         async def async_turn_off(self, **kwargs):
             uid = self._device.get("uid", "")
-            payload = dc.light_off(
-                self._device_id, uid,
-                self._device_type,
-                self.coordinator.username,
-            )
+            if self._profile_name == "power_only_light":
+                payload = dc.power_only_light(
+                    self._device_id,
+                    uid,
+                    False,
+                    self.coordinator.username,
+                )
+            else:
+                payload = dc.light_off(
+                    self._device_id,
+                    uid,
+                    self._device_type,
+                    self.coordinator.username,
+                )
             await self.coordinator.async_control_device(self._device_id, payload)
 
-    coordinator: OrviboLanCoordinator = hass.data[DOMAIN][entry.entry_id]
+    from . import get_runtime_data
+
+    coordinator: OrviboLanCoordinator = get_runtime_data(hass, entry).coordinator
     from .selection import selected_device_ids
+
     selected_ids = selected_device_ids(entry.options, coordinator.devices)
     entities = []
 
@@ -225,7 +247,8 @@ async def async_setup_entry(
         if did not in selected_ids:
             continue
         dt = coordinator.device_types.get(did, 0)
-        if dt not in (1, 38, 102, 501, 502, 503, 0):
+        state = coordinator.get_device_state(did)
+        if not supports_platform(device, state, "light"):
             continue
         if dt in HIDDEN_TYPES:
             continue

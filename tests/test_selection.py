@@ -1,17 +1,19 @@
 """Tests for selection helpers (port of orvibohomebridge test_selection)."""
 
-import sys
-import os
 import importlib.util
+import os
 
 # Load module directly (no HA dependency)
 _orvibo_lan = os.path.join(os.path.dirname(__file__), "..")
 _mod_path = os.path.join(_orvibo_lan, "custom_components", "orvibo_lan", "selection.py")
-_spec = importlib.util.spec_from_file_location(
-    "custom_components.orvibo_lan.selection", _mod_path
-)
+_spec = importlib.util.spec_from_file_location("custom_components.orvibo_lan.selection", _mod_path)
 _selection = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_selection)
+
+
+def test_config_entry_unique_id_includes_family():
+    assert _selection.config_entry_unique_id("user-1", "family-1") == "user-1:family-1"
+    assert _selection.config_entry_unique_id("user-1", None) == "user-1"
 
 
 def test_selected_device_ids_default_all():

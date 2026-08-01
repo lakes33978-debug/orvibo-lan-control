@@ -1,7 +1,15 @@
-"""ORVIBO LAN Control 常量定义。"""
+"""ORVIBO LAN  常量定义。"""
 
-import os
 from datetime import timedelta
+
+from .profiles import (
+    DEVICE_PROFILES,
+    PLATFORM_CLIMATE,
+    PLATFORM_COVER,
+    PLATFORM_FAN,
+    PLATFORM_LIGHT,
+    PLATFORM_SENSOR,
+)
 
 # ---- HA 配置键 ----
 DOMAIN = "orvibo_lan"
@@ -12,50 +20,43 @@ CONF_PASSWORD = "password"
 CONF_FAMILY_ID = "family_id"
 CONF_SELECTED_DEVICE_IDS = "selected_device_ids"
 
+SERVICE_REFRESH_DEVICES = "refresh_devices"
+
 # ---- 更新间隔 ----
-UPDATE_INTERVAL = timedelta(seconds=30)      # 从云端轮询状态
-GATEWAY_DISCOVER_INTERVAL = timedelta(minutes=5)  # UDP 发现网关
+UPDATE_INTERVAL = timedelta(minutes=1)  # 补充只读属性设备的云端状态
+GATEWAY_DISCOVER_INTERVAL = timedelta(minutes=5)  # UDP发现网关
 
 # ---- 设备类型映射 ----
-DEVICE_TYPE_COVER = "cover"
+DEVICE_TYPE_COVER = PLATFORM_COVER
 DEVICE_TYPE_SWITCH = "switch"
-DEVICE_TYPE_LIGHT = "light"
-DEVICE_TYPE_SENSOR = "sensor"
-DEVICE_TYPE_CLIMATE = "climate"
-DEVICE_TYPE_FAN = "fan"
+DEVICE_TYPE_LIGHT = PLATFORM_LIGHT
+DEVICE_TYPE_SENSOR = PLATFORM_SENSOR
+DEVICE_TYPE_CLIMATE = PLATFORM_CLIMATE
+DEVICE_TYPE_FAN = PLATFORM_FAN
 
-# 设备类型 → HA 平台映射
+# 设备类型 -> HA 平台集合。所有候选设备和实体平台均以此表为准。
+# type=81 同时具备 climate 和 fan 能力，不能用单值映射表达。
+DEVICE_PLATFORM_MAP = {
+    device_type: profile.platforms for device_type, profile in DEVICE_PROFILES.items()
+}
+
+# 兼容旧代码和外部引用；新代码应使用 DEVICE_PLATFORM_MAP。
+_PLATFORM_PRIORITY = (
+    DEVICE_TYPE_LIGHT,
+    DEVICE_TYPE_COVER,
+    DEVICE_TYPE_CLIMATE,
+    DEVICE_TYPE_FAN,
+    DEVICE_TYPE_SENSOR,
+    "binary_sensor",
+)
 DEVICE_TYPE_MAP = {
-    1: DEVICE_TYPE_LIGHT,           # 简版灯
-    34: DEVICE_TYPE_COVER,          # 窗帘
-    35: DEVICE_TYPE_COVER,          # 卷帘
-    36: DEVICE_TYPE_CLIMATE,        # 空调
-    38: DEVICE_TYPE_LIGHT,          # 调光调色灯
-    52: "clothes_horse",            # 晾衣架（后续通过 service 实现）
-    81: DEVICE_TYPE_CLIMATE,        # 空调/风机盘管（同 type=36）
-    102: DEVICE_TYPE_LIGHT,         # 灯
-    501: DEVICE_TYPE_LIGHT,         # 单色灯
-    502: DEVICE_TYPE_LIGHT,         # 可调光灯
-    503: DEVICE_TYPE_LIGHT,         # 色温灯带
-    516: DEVICE_TYPE_FAN,           # 新风系统
-    0: DEVICE_TYPE_LIGHT,           # Zigbee 调光灯
-    # ---- 传感器 ----
-    22: DEVICE_TYPE_SENSOR,         # 温湿度传感器
-    23: DEVICE_TYPE_SENSOR,         # 温湿度传感器
-    25: DEVICE_TYPE_SENSOR,         # 可燃气体探测器
-    26: DEVICE_TYPE_SENSOR,         # 人体传感器
-    27: DEVICE_TYPE_SENSOR,         # 烟雾传感器
-    46: DEVICE_TYPE_SENSOR,         # 门窗传感器
-    54: DEVICE_TYPE_SENSOR,         # 水浸探测器
-    56: DEVICE_TYPE_SENSOR,         # 紧急按钮
-    300: DEVICE_TYPE_SENSOR,        # 门锁/温湿度传感器
-    522: DEVICE_TYPE_SENSOR,        # 门锁 V5
-    107: DEVICE_TYPE_SENSOR,        # 门锁 T1
+    device_type: next(platform for platform in _PLATFORM_PRIORITY if platform in platforms)
+    for device_type, platforms in DEVICE_PLATFORM_MAP.items()
 }
 
 # 不暴露为实体的隐藏设备类型（MixPad、开关底座、红外遥控、摄像头、音乐主机、射频类）
-# 注意：Wifi 直连设备（如 type=52 晾衣架、type=107/522 Wifi 门锁等）不在本表过滤，
-# 而是由 coordinator.py 和 config_flow.py 通过设备 uid 是否匹配 MixPad 网关 uid 来动态剔除。
+# 注意：Wifi直连设备（如 type=107/522 Wifi 门锁等）不在本表过滤，
+# 而是由 coordinator.py 和 config_flow.py通过设备 uid 是否匹配 MixPad 网关 uid 来动态剔除。
 HIDDEN_TYPES = {114, 511, 518, 150, 14, 128, 135, 136, 137, 143, 155, 115}
 
 # ---- 支持的平台 ----

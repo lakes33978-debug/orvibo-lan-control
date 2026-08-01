@@ -1,28 +1,34 @@
 """Orvibo LAN Cover 平台（窗帘）。"""
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import OrviboLanCoordinator
+from .device_profiles import supports_platform
+from .entity import OrviboLanEntity
 from .lib import device_control as dc
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
+    hass: HomeAssistant,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-):
+) -> None:
     # 延迟导入，避免 HA 2026 import_module 阻塞检测
-    from homeassistant.components.cover import CoverEntity, CoverDeviceClass
+    from homeassistant.components.cover import (
+        ATTR_POSITION,
+        CoverDeviceClass,
+        CoverEntity,
+    )
 
-    class OrviboLanCover(CoordinatorEntity, CoverEntity):
+    class OrviboLanCover(OrviboLanEntity, CoverEntity):
         """Orvibo 窗帘实体。"""
 
         _attr_has_entity_name = True
@@ -49,9 +55,8 @@ async def async_setup_entry(
                 "name": device.get("deviceName", f"Cover {device_id[:8]}"),
                 "manufacturer": MANUFACTURER,
                 "model": "Orvibo Curtain",
-                "sw_version": "1.0",
             }
-            if uid:
+            if uid and device.get("_orvibo_lan_capable"):
                 dev_info["via_device"] = (DOMAIN, f"gateway_{uid}")
             self._attr_device_info = dev_info
 
@@ -81,31 +86,35 @@ async def async_setup_entry(
             return self._parse_position(st)
 
         async def async_open_cover(self, **kwargs):
-            payload = dc.cover_open(self._device_id, self._device.get("uid", ""),
-                                    self.coordinator.username)
+            payload = dc.cover_open(
+                self._device_id, self._device.get("uid", ""), self.coordinator.username
+            )
             await self.coordinator.async_control_device(self._device_id, payload)
-            await self.coordinator.async_request_refresh()
 
         async def async_close_cover(self, **kwargs):
-            payload = dc.cover_close(self._device_id, self._device.get("uid", ""),
-                                     self.coordinator.username)
+            payload = dc.cover_close(
+                self._device_id, self._device.get("uid", ""), self.coordinator.username
+            )
             await self.coordinator.async_control_device(self._device_id, payload)
-            await self.coordinator.async_request_refresh()
 
         async def async_stop_cover(self, **kwargs):
-            payload = dc.cover_stop(self._device_id, self._device.get("uid", ""),
-                                    self.coordinator.username)
+            payload = dc.cover_stop(
+                self._device_id, self._device.get("uid", ""), self.coordinator.username
+            )
             await self.coordinator.async_control_device(self._device_id, payload)
-            await self.coordinator.async_request_refresh()
 
-        async def async_set_cover_position(self, position: int, **kwargs):
-            payload = dc.cover_position(self._device_id, self._device.get("uid", ""),
-                                        position, self.coordinator.username)
+        async def async_set_cover_position(self, **kwargs):
+            position = kwargs[ATTR_POSITION]
+            payload = dc.cover_position(
+                self._device_id, self._device.get("uid", ""), position, self.coordinator.username
+            )
             await self.coordinator.async_control_device(self._device_id, payload)
-            await self.coordinator.async_request_refresh()
 
-    coordinator: OrviboLanCoordinator = hass.data[DOMAIN][entry.entry_id]
+    from . import get_runtime_data
+
+    coordinator: OrviboLanCoordinator = get_runtime_data(hass, entry).coordinator
     from .selection import selected_device_ids
+
     selected_ids = selected_device_ids(entry.options, coordinator.devices)
     entities = []
 
@@ -115,7 +124,11 @@ async def async_setup_entry(
         if did not in selected_ids:
             continue
         dt = coordinator.device_types.get(did, 0)
-        if dt not in (34, 35):
+        if not supports_platform(
+            device,
+            coordinator.get_device_state(did),
+            "cover",
+        ):
             continue
         if dt in HIDDEN_TYPES:
             continue

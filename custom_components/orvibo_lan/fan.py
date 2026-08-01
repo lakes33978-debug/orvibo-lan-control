@@ -1,28 +1,31 @@
 """Orvibo LAN Fan 平台（新风系统）。"""
 
 import logging
-from typing import Any, Optional
+from collections.abc import Mapping
+from typing import Optional
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import OrviboLanCoordinator
+from .device_profiles import supports_platform
+from .entity import OrviboLanEntity
 from .lib import device_control as dc
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
+    hass: HomeAssistant,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-):
+) -> None:
     # 延迟导入，避免 HA 2026 import_module 阻塞检测
     from homeassistant.components.fan import FanEntity, FanEntityFeature
 
-    class OrviboLanFan(CoordinatorEntity, FanEntity):
+    class OrviboLanFan(OrviboLanEntity, FanEntity):
         """Orvibo 新风实体。"""
 
         _attr_has_entity_name = True
@@ -37,8 +40,7 @@ async def async_setup_entry(
             self._attr_unique_id = f"{DOMAIN}_fan_{device_id}"
             self._attr_name = name
             self._attr_supported_features = (
-                FanEntityFeature.SET_SPEED | FanEntityFeature.TURN_ON |
-                FanEntityFeature.TURN_OFF
+                FanEntityFeature.SET_SPEED | FanEntityFeature.TURN_ON | FanEntityFeature.TURN_OFF
             )
             self._attr_speed_count = 4  # low/medium/high/auto
 
@@ -49,9 +51,8 @@ async def async_setup_entry(
                 "name": device.get("deviceName", f"Fan {device_id[:8]}"),
                 "manufacturer": MANUFACTURER,
                 "model": "Orvibo Fan",
-                "sw_version": "1.0",
             }
-            if uid:
+            if uid and device.get("_orvibo_lan_capable"):
                 dev_info["via_device"] = (DOMAIN, f"gateway_{uid}")
             self._attr_device_info = dev_info
 
@@ -73,9 +74,13 @@ async def async_setup_entry(
             if self._device_type == 516:
                 props = st.get("properties", {}) or {}
                 onoff = props.get("onoff", {})
-                if isinstance(onoff, dict):
-                    return onoff.get("status") == "on"
-                return False
+                if isinstance(onoff, Mapping):
+                    status = onoff.get("status")
+                    if status is not None:
+                        return status == "on"
+                # Legacy ventilation_control uses 50=stop, 0=slow, 100=fast.
+                value1 = st.get("value1")
+                return value1 is not None and int(value1) != 50
             # type 81: value2 表示档位, >0 表示开启
             v2 = st.get("value2")
             if v2 is not None:
@@ -86,10 +91,19 @@ async def async_setup_entry(
             if self._device_type == 516:
                 props = st.get("properties", {}) or {}
                 fan_speed = props.get("fanSpeed", {})
-                if isinstance(fan_speed, dict):
+                if isinstance(fan_speed, Mapping):
                     speed_value = fan_speed.get("value")
                     if speed_value is not None:
                         return int(speed_value) * 100 // 100
+                value1 = st.get("value1")
+                if value1 is not None:
+                    value1 = int(value1)
+                    if value1 == 50:
+                        return 0
+                    if value1 == 0:
+                        return 33
+                    if value1 == 100:
+                        return 100
                 return None
             # type 81: value2 = 0(off)/1(low)/2(mid)/3(high)
             v2 = st.get("value2")
@@ -100,37 +114,47 @@ async def async_setup_entry(
                 return int(v2 * 100 / 3)
             return None
 
-        async def async_turn_on(self, speed: Optional[str] = None,
-                                 percentage: Optional[int] = None, **kwargs):
+        async def async_turn_on(
+            self,
+            speed: Optional[str] = None,
+            percentage: Optional[int] = None,
+            **kwargs: object,
+        ) -> None:
             if percentage is not None:
                 await self.async_set_percentage(percentage)
             else:
                 payload = dc.fan_on(
-                    self._device_id, self._device.get("uid", ""),
-                    self._device_type, username=self.coordinator.username,
+                    self._device_id,
+                    self._device.get("uid", ""),
+                    self._device_type,
+                    username=self.coordinator.username,
                 )
                 await self.coordinator.async_control_device(self._device_id, payload)
-                await self.coordinator.async_request_refresh()
 
         async def async_turn_off(self, **kwargs):
             payload = dc.fan_off(
-                self._device_id, self._device.get("uid", ""),
-                self._device_type, username=self.coordinator.username,
-            )
-            await self.coordinator.async_control_device(self._device_id, payload)
-            await self.coordinator.async_request_refresh()
-
-        async def async_set_percentage(self, percentage: int):
-            payload = dc.fan_set_speed(
-                self._device_id, self._device.get("uid", ""),
-                self._device_type, percentage,
+                self._device_id,
+                self._device.get("uid", ""),
+                self._device_type,
                 username=self.coordinator.username,
             )
             await self.coordinator.async_control_device(self._device_id, payload)
-            await self.coordinator.async_request_refresh()
 
-    coordinator: OrviboLanCoordinator = hass.data[DOMAIN][entry.entry_id]
+        async def async_set_percentage(self, percentage: int) -> None:
+            payload = dc.fan_set_speed(
+                self._device_id,
+                self._device.get("uid", ""),
+                self._device_type,
+                percentage,
+                username=self.coordinator.username,
+            )
+            await self.coordinator.async_control_device(self._device_id, payload)
+
+    from . import get_runtime_data
+
+    coordinator: OrviboLanCoordinator = get_runtime_data(hass, entry).coordinator
     from .selection import selected_device_ids
+
     selected_ids = selected_device_ids(entry.options, coordinator.devices)
     entities = []
 
@@ -140,7 +164,11 @@ async def async_setup_entry(
         if did not in selected_ids:
             continue
         dt = coordinator.device_types.get(did, 0)
-        if dt not in (516, 81):
+        if not supports_platform(
+            device,
+            coordinator.get_device_state(did),
+            "fan",
+        ):
             continue
         if dt in HIDDEN_TYPES:
             continue

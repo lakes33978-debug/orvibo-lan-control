@@ -2,13 +2,15 @@
 测试：AES 加密单例缓存。
 验证 _get_cipher() 返回同一个 Cipher 对象对相同的 key，且加解密功能正常。
 """
-import pytest
-from cryptography.hazmat.primitives.ciphers import Cipher, modes
+
+from cryptography.hazmat.primitives.ciphers import modes
 
 from custom_components.orvibo_lan.lib.packet import (
-    _AES_CIPHER_CACHE, _get_cipher,
-    _encrypt_aes_ecb, _decrypt_aes_ecb,
+    _AES_CIPHER_CACHE,
     DEFAULT_KEY,
+    _decrypt_aes_ecb,
+    _encrypt_aes_ecb,
+    _get_cipher,
 )
 
 
