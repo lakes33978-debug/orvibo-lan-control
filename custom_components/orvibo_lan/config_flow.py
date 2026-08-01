@@ -61,7 +61,9 @@ def _device_schema(
     )
 
 
-async def _load_devices(client: CloudClient) -> list[JsonObject]:
+async def _load_devices(
+    client: CloudClient,
+) -> tuple[list[JsonObject], Mapping[str, str]]:
     devices, statuses, _gateways, rooms, gateway_ips, _resolver = await client.fetch_devices()
     room_names = {
         str(room["roomId"]): str(room.get("roomName") or "")
@@ -80,7 +82,7 @@ async def _load_devices(client: CloudClient) -> list[JsonObject]:
         normalized = dict(device)
         normalized["roomName"] = room_names.get(str(device.get("roomId") or ""), "")
         result.append(normalized)
-    return result
+    return result, gateway_ips
 
 
 class OrviboLanConfigFlow(  # type: ignore[call-arg]
@@ -99,6 +101,7 @@ class OrviboLanConfigFlow(  # type: ignore[call-arg]
         self._selected_family_id: str | None = None
         self._user_id = ""
         self._devices: list[JsonObject] = []
+        self._gateway_auth_checked = False
         self._client: CloudClient | None = None
 
     @staticmethod
@@ -178,11 +181,16 @@ class OrviboLanConfigFlow(  # type: ignore[call-arg]
         errors: dict[str, str] = {}
         if not self._devices and self._client is not None:
             try:
-                self._devices = await _load_devices(self._client)
+                self._devices, gateway_ips = await _load_devices(self._client)
             except CloudAuthenticationError:
                 errors["base"] = "auth_failed"
             except CloudClientError:
                 errors["base"] = "cannot_connect"
+            else:
+                if self._devices and not self._gateway_auth_checked:
+                    self._gateway_auth_checked = True
+                    if not await self._probe_gateway_login(gateway_ips):
+                        return self.async_abort(reason="auth_failed")
         if not self._devices and not errors:
             errors["base"] = "no_devices"
         if user_input is not None and CONF_SELECTED_DEVICE_IDS in user_input:
@@ -242,16 +250,62 @@ class OrviboLanConfigFlow(  # type: ignore[call-arg]
             except CloudClientError:
                 errors["base"] = "cannot_connect"
             else:
-                data = dict(entry.data)
-                data[CONF_PASSWORD] = password
-                self.hass.config_entries.async_update_entry(entry, data=data)
-                await self.hass.config_entries.async_reload(entry.entry_id)
-                return self.async_abort(reason="reauth_successful")
+                self._password = password
+                try:
+                    _devices, gateway_ips = await _load_devices(client)
+                except CloudAuthenticationError:
+                    errors["base"] = "auth_failed"
+                except CloudClientError:
+                    errors["base"] = "cannot_connect"
+                else:
+                    if not await self._probe_gateway_login(gateway_ips):
+                        errors["base"] = "auth_failed"
+                    else:
+                        data = dict(entry.data)
+                        data[CONF_PASSWORD] = password
+                        self.hass.config_entries.async_update_entry(entry, data=data)
+                        await self.hass.config_entries.async_reload(entry.entry_id)
+                        return self.async_abort(reason="reauth_successful")
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),
             errors=errors,
         )
+
+    async def _probe_gateway_login(
+        self,
+        gateway_ips: Mapping[str, str],
+    ) -> bool:
+        """Probe one LAN gateway login to validate the password.
+
+        The REST OAuth endpoint issues tokens for any password, so the real
+        credential check happens when the MixPad gateway logs in over LAN.
+        Only an explicit gateway rejection is treated as an auth failure;
+        network or timeout errors do not block the configuration flow.
+        """
+        if not gateway_ips:
+            return True
+        from .lib.gateway_connection import (
+            GatewayConnection,
+            GatewayLoginRejectedError,
+        )
+
+        uid, host = next(iter(gateway_ips.items()))
+        connection = GatewayConnection(str(host))
+        try:
+            await connection.connect(
+                self._username,
+                self._password,
+                expected_uid=str(uid),
+                allow_missing_uid=True,
+            )
+        except GatewayLoginRejectedError:
+            return False
+        except Exception:
+            return True
+        finally:
+            await connection.close()
+        return True
 
 
 class OrviboLanOptionsFlow(config_entries.OptionsFlow):
@@ -279,7 +333,7 @@ class OrviboLanOptionsFlow(config_entries.OptionsFlow):
             )
             try:
                 await client.login()
-                self._devices = await _load_devices(client)
+                self._devices, _gateway_ips = await _load_devices(client)
             except CloudAuthenticationError:
                 errors["base"] = "auth_failed"
             except CloudClientError:
