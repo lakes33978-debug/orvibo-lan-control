@@ -135,10 +135,24 @@ class OrviboLanConfigFlow(  # type: ignore[call-arg]
                     self._family_list = client.family_list
                     self._family_name = client.family_name
                     self._user_id = client.user_id or username
-                    if len(self._family_list) > 1:
-                        return await self.async_step_select_family()
-                    self._selected_family_id = client.family_id
-                    return await self.async_step_devices()
+
+                    # 前置认证校验：拉第一个家庭的设备表获取网关 IP，
+                    # 密码错误时在凭据表单直接提示，不展示家庭列表
+                    try:
+                        _probe_devices, probe_gateway_ips = await _load_devices(client)
+                    except CloudAuthenticationError:
+                        errors["base"] = "auth_failed"
+                    except CloudClientError:
+                        errors["base"] = "cannot_connect"
+                    else:
+                        if not await self._probe_gateway_login(probe_gateway_ips):
+                            errors["base"] = "auth_failed"
+                        else:
+                            self._gateway_auth_checked = True
+                            if len(self._family_list) > 1:
+                                return await self.async_step_select_family()
+                            self._selected_family_id = client.family_id
+                            return await self.async_step_devices()
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
