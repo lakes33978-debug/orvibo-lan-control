@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Orvibo 局域网控制",
+        "title": "Orvibo 局域网",
         "description": "输入您的智家365账号（手机号或邮箱）",
         "data": {
           "username": "手机号或邮箱",
@@ -18,7 +18,7 @@
       },
       "devices": {
         "title": "选择设备",
-        "description": "选择需要通过局域网控制的设备（默认全选）",
+        "description": "选择需要接入的设备（LAN 子设备可控制，属性型设备可能仅提供只读状态；默认全选）",
         "data": {
           "selected_device_ids": "选择设备"
         }
@@ -32,28 +32,34 @@
       "no_devices_selected": "请至少选择一个设备"
     },
     "abort": {
-      "already_configured": "该账号已配置"
+      "already_configured": "该账号已配置",
+      "auth_failed": "登录失败，请检查账号密码",
+      "no_devices": "该家庭下没有可控制的设备"
     }
   },
   "options": {
     "step": {
       "devices": {
         "title": "选择设备",
-        "description": "选择需要通过局域网控制的设备",
+        "description": "选择需要接入的 LAN 或属性型只读设备",
         "data": {
           "selected_device_ids": "选择设备"
         }
       },
       "init": {
         "title": "选择设备",
-        "description": "选择需要通过局域网控制的设备",
+        "description": "选择需要接入的 LAN 或属性型只读设备",
         "data": {
           "selected_device_ids": "选择设备"
         }
       }
     },
     "error": {
-      "no_devices_selected": "请至少选择一个设备"
+      "no_devices_selected": "请至少选择一个设备",
+      "no_devices": "该家庭下没有可控制的设备"
+    },
+    "abort": {
+      "no_devices": "该家庭下没有可控制的设备"
     }
   }
 }

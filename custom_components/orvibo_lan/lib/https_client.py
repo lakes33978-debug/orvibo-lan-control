@@ -5,13 +5,13 @@
 只用于获取设备列表和网关IP，控制走局域网 TCP 8088。
 """
 
-import json
-import time
-import os
-import uuid
-import hmac
 import hashlib
+import hmac
+import json
 import logging
+import os
+import time
+import uuid
 from typing import Optional
 
 import aiohttp
@@ -24,7 +24,12 @@ _LOGGER = logging.getLogger(__name__)
 class HttpsClient:
     """通过 HTTPS 获取设备列表和网关信息。"""
 
-    def __init__(self, username: str, password: str, family_id: str = None):
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        family_id: str | None = None,
+    ) -> None:
         self.username = username
         self.password = password
         self.family_id = family_id
@@ -37,13 +42,19 @@ class HttpsClient:
     async def ensure_login(self) -> bool:
         """独立登录方法（不依赖外部 session）。"""
         import aiohttp
+
         try:
             pwd_md5 = hashlib.md5(self.password.encode()).hexdigest().upper()
-            url = f"https://{HTTPS_HOST}/getOauthToken?userName={self.username}&type=0&password={pwd_md5}"
-            async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(ssl=False)
-            ) as session:
-                resp = await session.get(url)
+            url = f"https://{HTTPS_HOST}/getOauthToken"
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    url,
+                    params={
+                        "userName": self.username,
+                        "type": "0",
+                        "password": pwd_md5,
+                    },
+                )
                 j = json.loads(await resp.text())
                 if j.get("status") != 0 and j.get("code") != 0:
                     return False
@@ -61,9 +72,12 @@ class HttpsClient:
 
     async def _fetch_family_list(self):
         """获取用户家庭列表。"""
-        import aiohttp
         import uuid
-        from .packet import HTTPS_HOST, SIGN_KEY, SOFTWARE_VER
+
+        import aiohttp
+
+        from .packet import HTTPS_HOST, SIGN_KEY
+
         try:
             ts = int(time.time() * 1000)
             rand = uuid.uuid4().hex
@@ -80,12 +94,13 @@ class HttpsClient:
                 if v is not None and str(v).strip() != "":
                     sb.append(f"{k}={v}&")
             sb.append(f"key={SIGN_KEY}")
-            sign = hmac.new(SIGN_KEY.encode(), "".join(sb).encode(),
-                            hashlib.sha256).hexdigest().upper()
+            sign = (
+                hmac.new(SIGN_KEY.encode(), "".join(sb).encode(), hashlib.sha256)
+                .hexdigest()
+                .upper()
+            )
 
-            async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(ssl=False)
-            ) as session:
+            async with aiohttp.ClientSession() as session:
                 resp = await session.post(
                     f"https://{HTTPS_HOST}/v2/family/statistics/users",
                     json={
@@ -94,7 +109,7 @@ class HttpsClient:
                         "sign": sign,
                         "timestamp": ts,
                         "userId": self.user_id,
-                    }
+                    },
                 )
                 j = await resp.json(content_type=None)
                 raw = j.get("data") or []
@@ -111,18 +126,25 @@ class HttpsClient:
             _LOGGER.debug(f"获取家庭列表失败: {e}")
             self.family_list = []
 
-    async def _ensure_token(self, session: aiohttp.ClientSession):
+    async def _ensure_token(self, session: aiohttp.ClientSession) -> None:
         """获取 access_token（含登录）。"""
         if self.access_token:
             return
 
         pwd_md5 = hashlib.md5(self.password.encode()).hexdigest().upper()
-        url = f"https://{HTTPS_HOST}/getOauthToken?userName={self.username}&type=0&password={pwd_md5}"
-        resp = await session.get(url)
+        url = f"https://{HTTPS_HOST}/getOauthToken"
+        resp = await session.get(
+            url,
+            params={
+                "userName": self.username,
+                "type": "0",
+                "password": pwd_md5,
+            },
+        )
         j = json.loads(await resp.text())
 
         if j.get("status") != 0 and j.get("code") != 0:
-            raise RuntimeError(f"登录失败: {j}")
+            raise RuntimeError("登录失败")
 
         data = j.get("data", {})
         self.access_token = data.get("access_token")
@@ -139,8 +161,7 @@ class HttpsClient:
             if v is not None and str(v).strip() != "":
                 sb.append(f"{k}={v}&")
         sb.append(f"key={SIGN_KEY}")
-        return hmac.new(SIGN_KEY.encode(), "".join(sb).encode(),
-                        hashlib.sha256).hexdigest().upper()
+        return hmac.new(SIGN_KEY.encode(), "".join(sb).encode(), hashlib.sha256).hexdigest().upper()
 
     async def fetch_devices(self):
         """获取设备列表和网关信息。
@@ -148,9 +169,7 @@ class HttpsClient:
         Returns:
             (devices, statuses, gateways, rooms, gateway_ips, get_gateway_ip_for_device)
         """
-        async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False)
-        ) as session:
+        async with aiohttp.ClientSession() as session:
             await self._ensure_token(session)
             devices, statuses, gateways, rooms = await self._fetch_readtable(session)
 
@@ -169,7 +188,10 @@ class HttpsClient:
 
         return devices, statuses, gateways, rooms, gateway_ips, get_gateway_ip_for_device
 
-    async def _fetch_readtable(self, session: aiohttp.ClientSession):
+    async def _fetch_readtable(
+        self,
+        session: aiohttp.ClientSession,
+    ) -> tuple[list, dict, list, list]:
         """获取完整设备列表（含网关信息）。
 
         通过 /v2/cmd/app/readtable API 获取。
@@ -205,14 +227,11 @@ class HttpsClient:
         data = dict(params)
         data["sign"] = sign
 
-        resp = await session.post(
-            f"https://{HTTPS_HOST}/v2/cmd/app/readtable",
-            json=data
-        )
+        resp = await session.post(f"https://{HTTPS_HOST}/v2/cmd/app/readtable", json=data)
         j = await resp.json(content_type=None)
 
         if j.get("code") != 0:
-            raise RuntimeError(f"获取设备列表失败: {j}")
+            raise RuntimeError("获取设备列表失败")
 
         dd = j.get("data", {})
         devices = dd.get("device", [])

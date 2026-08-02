@@ -1,144 +1,115 @@
-"""Tests: family selection propagates to _create_entry in orvibo-lan-control.
+"""Production-path tests for configuration and family selection flows."""
 
-Verifies the data logic only — doesn't instantiate HA flow classes.
-"""
 from __future__ import annotations
 
-import importlib.util
-import os
-import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-_test_root = os.path.dirname(os.path.abspath(__file__))
-_orvibo_lan = os.path.join(_test_root, "..", "custom_components")
+import pytest
 
-# Load const for CONF constants
-const_path = os.path.join(_orvibo_lan, "orvibo_lan", "const.py")
-spec = importlib.util.spec_from_file_location("custom_components.orvibo_lan.const", const_path)
-assert spec is not None and spec.loader is not None
-const_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(const_mod)
-
-FAKE_FAMILIES = [
-    {"familyId": "fam-001", "familyName": "家庭A"},
-    {"familyId": "fam-002", "familyName": "家庭B"},
-    {"familyId": "fam-003", "familyName": "家庭C"},
-]
+from custom_components.orvibo_lan import config_flow
+from custom_components.orvibo_lan.const import (
+    CONF_FAMILY_ID,
+    CONF_PASSWORD,
+    CONF_SELECTED_DEVICE_IDS,
+    CONF_USERNAME,
+)
 
 
-class TestFamilySelectionDataLogic(unittest.TestCase):
-    """Test the data transformation logic inside config_flow.
+class FakeCloudClient:
+    def __init__(self) -> None:
+        self.family_list = [
+            {"familyId": "family-1", "familyName": "Home"},
+            {"familyId": "family-2", "familyName": "Office"},
+        ]
+        self.family_name = "Home"
+        self.family_id = "family-1"
+        self.user_id = "user-1"
 
-    We test the actual assignment/merge logic without instantiating HA flow classes.
-    """
+    async def login(self) -> None:
+        return None
 
-    def test_selected_family_overrides_first_family(self):
-        """_create_entry: _selected_family_id preferred over first family."""
-        _selected_family_id = "fam-002"
-        _family_list = FAKE_FAMILIES
-
-        family_id = _selected_family_id or (
-            _family_list[0]["familyId"] if _family_list else None
+    async def fetch_devices(self):
+        return (
+            [
+                {
+                    "deviceId": "device-1",
+                    "deviceType": 1,
+                    "uid": "gateway-1",
+                    "deviceName": "Desk light",
+                    "roomId": "room-1",
+                }
+            ],
+            {"device-1": {"deviceId": "device-1", "value1": 0}},
+            [],
+            [{"roomId": "room-1", "roomName": "Office"}],
+            {"gateway-1": "192.168.1.2"},
+            object(),
         )
-        self.assertEqual(family_id, "fam-002")
-        self.assertNotEqual(family_id, "fam-001")
-
-    def test_no_selection_falls_back_to_first_family(self):
-        """_create_entry: no selection → first family."""
-        _selected_family_id = None
-        _family_list = FAKE_FAMILIES
-
-        family_id = _selected_family_id or (
-            _family_list[0]["familyId"] if _family_list else None
-        )
-        self.assertEqual(family_id, "fam-001")
-
-    def test_selected_family_goes_into_entry_data(self):
-        """_create_entry: family_id appears in data dict."""
-        _selected_family_id = "fam-003"
-        _family_list = FAKE_FAMILIES
-        _username = "13800138000"
-        _password = "testpass"
-
-        family_id = _selected_family_id or (
-            _family_list[0]["familyId"] if _family_list else None
-        )
-        data = {
-            const_mod.CONF_USERNAME: _username,
-            const_mod.CONF_PASSWORD: _password,
-            const_mod.CONF_FAMILY_ID: family_id,
-        }
-        self.assertEqual(data[const_mod.CONF_FAMILY_ID], "fam-003")
-        self.assertEqual(data[const_mod.CONF_USERNAME], "13800138000")
-
-    def test_empty_family_list_with_no_selection(self):
-        """Edge case: no families and no selection."""
-        _selected_family_id = None
-        _family_list = []
-
-        family_id = _selected_family_id or (
-            _family_list[0]["familyId"] if _family_list else None
-        )
-        self.assertIsNone(family_id)
-
-    def test_empty_family_list_with_explicit_selection(self):
-        """Edge case: empty families but explicit selection set."""
-        _selected_family_id = "fam-099"
-        _family_list = []
-
-        family_id = _selected_family_id or (
-            _family_list[0]["familyId"] if _family_list else None
-        )
-        self.assertEqual(family_id, "fam-099")
-
-    def test_async_step_select_family_propagation(self):
-        """Simulate the full config flow step: user selects → stored → entry.
-
-        This exactly mirrors the data flow:
-        async_step_select_family → _selected_family_id = family_id
-        → update _family_name → _create_entry
-        """
-        # Step 1: user selects family B
-        user_input = {"family_id": "fam-002"}
-        _selected_family_id: str | None = None
-        _family_name = "家庭A"  # was set in async_step_user
-        _family_list = FAKE_FAMILIES
-
-        family_id_from_step = user_input.get("family_id")
-        if family_id_from_step:
-            _selected_family_id = family_id_from_step
-            # Update family name to match selection
-            for f in _family_list:
-                if f["familyId"] == family_id_from_step:
-                    _family_name = f.get("familyName", "")
-                    break
-
-        self.assertEqual(_selected_family_id, "fam-002")
-        self.assertEqual(_family_name, "家庭B")  # was "家庭A", now "家庭B"
-
-        # Step 2: _create_entry uses the stored values
-        family_id = _selected_family_id or (
-            _family_list[0]["familyId"] if _family_list else None
-        )
-        self.assertEqual(family_id, "fam-002")
-
-        # Step 3: entry title uses correct family name
-        title = f"13800138000 - {_family_name}"
-        self.assertEqual(title, "13800138000 - 家庭B")
-
-    def test_single_family_no_selection_keeps_first_name(self):
-        """Only one family → _family_name stays as first family's name."""
-        _family_name = "家庭A"
-        _family_list = [FAKE_FAMILIES[0]]
-        _selected_family_id = None
-
-        # No selection step happens, goes straight to _create_entry
-        family_id = _selected_family_id or (
-            _family_list[0]["familyId"] if _family_list else None
-        )
-        title = f"13800138000 - {_family_name}"
-        self.assertEqual(title, "13800138000 - 家庭A")
-        self.assertEqual(family_id, "fam-001")
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_selection_helpers_use_actual_production_functions() -> None:
+    devices = [
+        {"deviceId": "one", "deviceName": "Light", "roomName": "Office"},
+        {"deviceId": "two", "deviceName": "Sensor", "roomName": ""},
+    ]
+
+    assert config_flow._device_label("one", "Light", "Office") == "Light [Office]"
+    assert config_flow._validated_selection(["two", "missing"], devices) == ["two"]
+    assert config_flow._validated_selection("one", devices) == []
+
+
+def test_options_flow_keeps_config_entry_without_setting_read_only_property() -> None:
+    entry = SimpleNamespace(
+        data={
+            CONF_USERNAME: "account",
+            CONF_PASSWORD: "password",
+            CONF_FAMILY_ID: "family-1",
+        },
+        options={CONF_SELECTED_DEVICE_IDS: ["device-1"]},
+    )
+
+    flow = config_flow.OrviboLanConfigFlow.async_get_options_flow(entry)
+
+    assert flow._config_entry is entry
+
+
+@pytest.mark.asyncio
+async def test_user_flow_selects_family_devices_and_scopes_unique_id() -> None:
+    client = FakeCloudClient()
+    flow = config_flow.OrviboLanConfigFlow()
+    flow.hass = SimpleNamespace()
+
+    with (
+        patch.object(config_flow, "CloudClient", return_value=client),
+        patch.object(config_flow, "async_get_clientsession", return_value=object()),
+        patch.object(
+            config_flow.OrviboLanConfigFlow,
+            "_probe_gateway_login",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        result = await flow.async_step_user({CONF_USERNAME: "account", CONF_PASSWORD: "password"})
+        assert result["step_id"] == "select_family"
+
+        result = await flow.async_step_select_family({CONF_FAMILY_ID: "family-2"})
+        assert result["step_id"] == "devices"
+
+        result = await flow.async_step_devices({CONF_SELECTED_DEVICE_IDS: ["device-1"]})
+
+    assert result["type"] == "create_entry"
+    assert result["title"] == "account - Office"
+    assert result["data"][CONF_FAMILY_ID] == "family-2"
+    assert result["options"] == {CONF_SELECTED_DEVICE_IDS: ["device-1"]}
+    assert flow.unique_id == "user-1:family-2"
+
+
+@pytest.mark.asyncio
+async def test_user_flow_rejects_empty_credentials() -> None:
+    flow = config_flow.OrviboLanConfigFlow()
+    flow.hass = SimpleNamespace()
+
+    result = await flow.async_step_user({CONF_USERNAME: "", CONF_PASSWORD: ""})
+
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "empty_username_or_password"}

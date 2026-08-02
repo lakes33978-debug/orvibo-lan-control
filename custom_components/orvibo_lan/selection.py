@@ -1,4 +1,4 @@
-"""Device selection helper for Orvibo LAN Control config entries.
+"""Device selection helper for Orvibo LAN  config entries.
 
 参照 orvibohomebridge 的 selection.py，支持用户在配置流程中选择要暴露的设备。
 """
@@ -9,6 +9,12 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 CONF_SELECTED_DEVICE_IDS = "selected_device_ids"
+
+
+def config_entry_unique_id(user_id: str, family_id: str | None) -> str:
+    """Scope one account identity to a family when available."""
+
+    return f"{user_id}:{family_id}" if family_id else user_id
 
 
 def selected_device_ids(

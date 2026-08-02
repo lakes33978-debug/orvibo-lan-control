@@ -2,16 +2,19 @@
 """Orvibo 局域网协议封包/解包层。
 
 封包格式：42字节头 + AES-ECB 加密的 JSON payload
-  头：hd(2B) + 包长度(2B) + 包类型(2B) + CRC32(4B) + sessionId(32B)
+头：hd(2B) + 包长度(2B) + 包类型(2B) + CRC32(4B) + sessionId(32B)
 """
 
-import json
-import struct
 import binascii
+import json
 import logging
+import struct
+from collections.abc import Mapping
+from typing import Any
+
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,11 +41,10 @@ CMD_LOGIN = 2
 CMD_CONTROL = 15
 CMD_STATE_UPDATE = 42
 CMD_HEARTBEAT = 32
-CMD_CLOTHES_HORSE_CONTROL = 98
 
-ID_UNSET = b'\x20' * 32
-PK_TYPE = b'\x70\x6b'  # plain key (默认key加密)
-DK_TYPE = b'\x64\x6b'  # derived key (session key加密)
+ID_UNSET = b"\x20" * 32
+PK_TYPE = b"\x70\x6b"  # plain key (默认key加密)
+DK_TYPE = b"\x64\x6b"  # derived key (session key加密)
 
 
 def _crc32(data: bytes) -> bytes:
@@ -54,7 +56,7 @@ _AES_BACKEND = default_backend()
 _AES_CIPHER_CACHE: dict[bytes, Cipher] = {}
 
 
-def _get_cipher(key: bytes, mode) -> Cipher:
+def _get_cipher(key: bytes, mode: modes.Mode) -> Cipher:
     """获取或创建 AES cipher 单例。key 相同时复用 cipher 对象。"""
     if key not in _AES_CIPHER_CACHE:
         _AES_CIPHER_CACHE[key] = Cipher(algorithms.AES(key), mode, backend=_AES_BACKEND)
@@ -87,7 +89,10 @@ def build_packet(packet_type: bytes, key: bytes, session_id: bytes, payload: dic
     return MAGIC + length_bytes + packet_type + crc + session_id + encrypted
 
 
-def parse_packet(data: bytes, keys: dict) -> dict:
+def parse_packet(
+    data: bytes,
+    keys: Mapping[bytes, bytes],
+) -> dict[str, Any] | None:
     """解析协议包。keys: {session_id_bytes: aes_key_bytes}"""
     if len(data) < 42:
         return None
@@ -112,7 +117,8 @@ def parse_packet(data: bytes, keys: dict) -> dict:
 
     try:
         plain = _decrypt_aes_ecb(key, encrypted)
-        return json.loads(plain)
+        payload = json.loads(plain)
+        return payload if isinstance(payload, dict) else None
     except Exception as e:
         _LOGGER.error(f"解密/解析失败: {e}")
         return None

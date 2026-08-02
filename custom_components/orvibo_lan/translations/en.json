@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "ORVIBO LAN Control",
+        "title": "ORVIBO LAN",
         "description": "Enter your Orvibo account (phone number)",
         "data": {
           "username": "Phone Number",
@@ -18,7 +18,7 @@
       },
       "devices": {
         "title": "Select Devices",
-        "description": "Select devices to control via LAN (all selected by default)",
+        "description": "Select devices to add (LAN child devices are controllable; property devices may be read-only; all selected by default)",
         "data": {
           "selected_device_ids": "Select Devices"
         }
@@ -32,28 +32,34 @@
       "no_devices_selected": "Please select at least one device"
     },
     "abort": {
-      "already_configured": "This account is already configured"
+      "already_configured": "This account is already configured",
+      "auth_failed": "Login failed, check your credentials",
+      "no_devices": "No supported devices were found"
     }
   },
   "options": {
     "step": {
       "devices": {
         "title": "Select Devices",
-        "description": "Select devices to control via LAN",
+        "description": "Select LAN or property-based read-only devices to add",
         "data": {
           "selected_device_ids": "Select Devices"
         }
       },
       "init": {
         "title": "Select Devices",
-        "description": "Select devices to control via LAN",
+        "description": "Select LAN or property-based read-only devices to add",
         "data": {
           "selected_device_ids": "Select Devices"
         }
       }
     },
     "error": {
-      "no_devices_selected": "Please select at least one device"
+      "no_devices_selected": "Please select at least one device",
+      "no_devices": "No supported devices were found"
+    },
+    "abort": {
+      "no_devices": "No supported devices were found"
     }
   }
 }

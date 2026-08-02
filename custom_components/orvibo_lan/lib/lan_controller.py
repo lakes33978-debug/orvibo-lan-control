@@ -3,17 +3,32 @@
 
 import asyncio
 import hashlib
-import time
-import struct
 import logging
-from typing import Optional, Dict, Any, List
+import struct
+import time
+from typing import Dict, Optional
 
 from .packet import (
-    build_packet, parse_packet, DEFAULT_KEY, ID_UNSET, PK_TYPE, DK_TYPE,
-    CMD_HELLO, CMD_LOGIN, CMD_CONTROL, CMD_HEARTBEAT, CMD_STATE_UPDATE,
-    SOFTWARE_NAME, SOFTWARE_VERSION, SYS_VERSION, HARDWARE_VERSION,
-    LANGUAGE, PHONE_NAME, DEBUG_INFO, SOFTWARE_VER,
+    CMD_CONTROL,
+    CMD_HEARTBEAT,
+    CMD_HELLO,
+    CMD_LOGIN,
+    CMD_STATE_UPDATE,
+    DEBUG_INFO,
+    DEFAULT_KEY,
+    DK_TYPE,
+    HARDWARE_VERSION,
+    ID_UNSET,
+    LANGUAGE,
+    PHONE_NAME,
+    PK_TYPE,
+    SOFTWARE_NAME,
+    SOFTWARE_VER,
+    SOFTWARE_VERSION,
+    SYS_VERSION,
     TCP_PORT,
+    build_packet,
+    parse_packet,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,7 +88,6 @@ class LanConnection:
         self._listen_task = None
 
         # 2. 关闭 writer 并等待完全关闭
-        transport = None
         if self.writer:
             try:
                 self.writer.close()
@@ -97,6 +111,9 @@ class LanConnection:
 
     async def hello(self) -> bool:
         """发送 Hello 包，获取 session key。"""
+        writer = self.writer
+        if writer is None:
+            return False
         payload = {
             "source": SOFTWARE_NAME,
             "softwareVersion": SOFTWARE_VERSION,
@@ -114,8 +131,8 @@ class LanConnection:
             "debugInfo": DEBUG_INFO,
         }
         packet = build_packet(PK_TYPE, DEFAULT_KEY.encode(), ID_UNSET, payload)
-        self.writer.write(packet)
-        await self.writer.drain()
+        writer.write(packet)
+        await writer.drain()
 
         raw = await self._read_packet()
         if raw is None:
@@ -124,7 +141,7 @@ class LanConnection:
         if parsed is None:
             return False
 
-        _LOGGER.debug(f"Hello 回复: {parsed}")
+        _LOGGER.debug("Hello response received from %s", self.host)
         sid = raw[10:42]
         raw_key = parsed.get("sessionKey") or parsed.get("key")
         if not raw_key:
@@ -137,16 +154,26 @@ class LanConnection:
                 self.session_key = bytes.fromhex(raw_key)
             except ValueError:
                 self.session_key = raw_key.encode("utf-8")
-        else:
+        elif isinstance(raw_key, bytes):
             self.session_key = raw_key
+        else:
+            return False
 
         self.session_id = sid
-        self._keys[self.session_id] = self.session_key
-        _LOGGER.debug(f"Hello OK, session_key 已获取")
+        session_key = self.session_key
+        if session_key is None:
+            return False
+        self._keys[self.session_id] = session_key
+        _LOGGER.debug("Hello OK, session_key 已获取")
         return True
 
     async def login(self, username: str, password: str) -> bool:
         """发送 Login 包。"""
+        writer = self.writer
+        session_key = self.session_key
+        session_id = self.session_id
+        if writer is None or session_key is None or session_id is None:
+            return False
         self._username = username
         pwd_md5 = hashlib.md5(password.encode()).hexdigest().upper()
         payload = {
@@ -157,9 +184,9 @@ class LanConnection:
             "clientType": 1,
             "source": SOFTWARE_NAME,
         }
-        packet = build_packet(DK_TYPE, self.session_key, self.session_id, payload)
-        self.writer.write(packet)
-        await self.writer.drain()
+        packet = build_packet(DK_TYPE, session_key, session_id, payload)
+        writer.write(packet)
+        await writer.drain()
 
         raw = await self._read_packet()
         if raw is None:
@@ -176,8 +203,9 @@ class LanConnection:
             _LOGGER.debug(f"Login 失败: status={status} (网关 {self.host})")
             return False
 
-    async def connect_and_login(self, username: str, password: str,
-                                connect_timeout: float = 5.0) -> bool:
+    async def connect_and_login(
+        self, username: str, password: str, connect_timeout: float = 5.0
+    ) -> bool:
         """一键连接 → Hello → Login。"""
         if not await self.connect(connect_timeout):
             return False
@@ -198,6 +226,11 @@ class LanConnection:
             while self.connected:
                 await asyncio.sleep(60)
                 try:
+                    writer = self.writer
+                    session_key = self.session_key
+                    session_id = self.session_id
+                    if writer is None or session_key is None or session_id is None:
+                        break
                     payload = {
                         "cmd": CMD_HEARTBEAT,
                         "serial": _serial(),
@@ -207,10 +240,8 @@ class LanConnection:
                         "ver": SOFTWARE_VER,
                         "debugInfo": DEBUG_INFO,
                     }
-                    self.writer.write(
-                        build_packet(DK_TYPE, self.session_key, self.session_id, payload)
-                    )
-                    await self.writer.drain()
+                    writer.write(build_packet(DK_TYPE, session_key, session_id, payload))
+                    await writer.drain()
                 except Exception as e:
                     _LOGGER.debug(f"心跳异常: {e}")
                     break
@@ -262,6 +293,11 @@ class LanConnection:
         if not self.connected:
             _LOGGER.error("未连接，无法发送控制命令")
             return None
+        writer = self.writer
+        session_key = self.session_key
+        session_id = self.session_id
+        if writer is None or session_key is None or session_id is None:
+            return None
 
         # 补全可选字段（不覆盖已有值）
         payload.setdefault("serial", _serial())
@@ -271,14 +307,19 @@ class LanConnection:
         payload.setdefault("debugInfo", DEBUG_INFO)
         payload.setdefault("source", SOFTWARE_NAME)
 
-        _LOGGER.debug(f"发送控制命令到 {self.host}: payload={payload}")
+        _LOGGER.debug(
+            "Sending control command to %s: cmd=%s device=%s",
+            self.host,
+            payload.get("cmd"),
+            payload.get("deviceId"),
+        )
 
         if "cmd" not in payload:
             payload["cmd"] = CMD_CONTROL
 
-        packet = build_packet(DK_TYPE, self.session_key, self.session_id, payload)
-        self.writer.write(packet)
-        await self.writer.drain()
+        packet = build_packet(DK_TYPE, session_key, session_id, payload)
+        writer.write(packet)
+        await writer.drain()
 
         # 读取回复：跳过 cmd=42 状态推送，最多读 3 个包
         for attempt in range(3):
@@ -295,8 +336,13 @@ class LanConnection:
         return None
 
     async def send_raw_cmd(self, payload: dict) -> Optional[dict]:
-        """发送任意 cmd 包（如 cmd=98 晾衣架），不跳过任何回复。"""
+        """发送任意 cmd 包，不跳过任何回复。"""
         if not self.connected:
+            return None
+        writer = self.writer
+        session_key = self.session_key
+        session_id = self.session_id
+        if writer is None or session_key is None or session_id is None:
             return None
 
         payload["serial"] = payload.get("serial", _serial())
@@ -305,9 +351,9 @@ class LanConnection:
         payload["ver"] = payload.get("ver", SOFTWARE_VER)
         payload["debugInfo"] = payload.get("debugInfo", DEBUG_INFO)
 
-        packet = build_packet(DK_TYPE, self.session_key, self.session_id, payload)
-        self.writer.write(packet)
-        await self.writer.drain()
+        packet = build_packet(DK_TYPE, session_key, session_id, payload)
+        writer.write(packet)
+        await writer.drain()
 
         raw = await self._read_packet(timeout=5.0)
         if raw is None:
@@ -315,12 +361,13 @@ class LanConnection:
         return parse_packet(raw, self._keys)
 
     async def _read_packet(self, timeout: float = 10.0) -> Optional[bytes]:
+        reader = self.reader
+        if reader is None:
+            return None
         try:
-            header = await asyncio.wait_for(self.reader.readexactly(4), timeout=timeout)
+            header = await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
             length = struct.unpack(">H", header[2:4])[0]
-            rest = await asyncio.wait_for(
-                self.reader.readexactly(length - 4), timeout=timeout
-            )
+            rest = await asyncio.wait_for(reader.readexactly(length - 4), timeout=timeout)
             return header + rest
         except asyncio.TimeoutError:
             _LOGGER.debug("读包超时")

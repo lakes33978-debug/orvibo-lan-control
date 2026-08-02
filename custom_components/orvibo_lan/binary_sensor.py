@@ -19,24 +19,36 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import OrviboLanCoordinator
+from .device_profiles import (
+    PROPERTY_DOOR_STATUS,
+    property_switch_state,
+    state_properties,
+    supports_platform,
+)
+from .entity import OrviboLanEntity
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class OrviboLanBinarySensorBase(CoordinatorEntity, BinarySensorEntity):
+class OrviboLanBinarySensorBase(OrviboLanEntity, BinarySensorEntity):
     """二元传感器基类。"""
 
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator, device_id: str, device: dict,
-        state_key: str, device_class: BinarySensorDeviceClass,
-        name: str, icon: str, model: str,
-    ):
+        self,
+        coordinator: OrviboLanCoordinator,
+        device_id: str,
+        device: dict,
+        state_key: str,
+        device_class: BinarySensorDeviceClass,
+        name: str,
+        icon: str,
+        model: str,
+    ) -> None:
         super().__init__(coordinator)
         self._device_id = device_id
         self._device = device
@@ -52,9 +64,8 @@ class OrviboLanBinarySensorBase(CoordinatorEntity, BinarySensorEntity):
             "name": device.get("deviceName", f"Sensor {device_id[:8]}"),
             "manufacturer": MANUFACTURER,
             "model": model,
-            "sw_version": "1.0",
         }
-        if uid:
+        if uid and device.get("_orvibo_lan_capable"):
             dev_info["via_device"] = (DOMAIN, f"gateway_{uid}")
         self._attr_device_info = dev_info
 
@@ -63,69 +74,113 @@ class OrviboLanBinarySensorBase(CoordinatorEntity, BinarySensorEntity):
         state = self.coordinator.get_device_state(self._device_id)
         return state.get(self._state_key, False) if state else False
 
+
+class OrviboLanPropertyDoorSensor(OrviboLanBinarySensorBase):
+    """Door state exposed through a ThingModel/cloud property."""
+
+    def __init__(
+        self,
+        coordinator: OrviboLanCoordinator,
+        device_id: str,
+        device: dict,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            device_id,
+            device,
+            state_key="property_door_open",
+            device_class=BinarySensorDeviceClass.DOOR,
+            name="门状态",
+            icon="mdi:door",
+            model=device.get("model") or "ORVIBO Property Device",
+        )
+        self._attr_unique_id = f"{DOMAIN}_binary_property_door_{device_id}"
+
     @property
-    def available(self) -> bool:
+    def is_on(self) -> Optional[bool]:
         state = self.coordinator.get_device_state(self._device_id)
-        return state.get("online", True) if state else True
+        if not state:
+            return None
+        parsed = property_switch_state(
+            state_properties(state),
+            PROPERTY_DOOR_STATUS,
+        )
+        return parsed
 
 
 # ── sensor 类型 → binary sensor 实体工厂 ──
 
 _BINARY_SENSOR_FACTORIES = {
-    26: [{
-        "state_key": "motion_detected",
-        "device_class": BinarySensorDeviceClass.MOTION,
-        "name": "人体检测",
-        "icon": "mdi:motion-sensor",
-        "model": "Motion Sensor",
-    }],
-    46: [{
-        "state_key": "door_state",
-        "device_class": BinarySensorDeviceClass.DOOR,
-        "name": "门磁状态",
-        "icon": "mdi:door-open",
-        "model": "Door Window Sensor",
-    }],
-    25: [{
-        "state_key": "gas_detected",
-        "device_class": BinarySensorDeviceClass.GAS,
-        "name": "燃气检测",
-        "icon": "mdi:gas-cylinder",
-        "model": "Gas Sensor",
-    }],
-    27: [{
-        "state_key": "smoke_detected",
-        "device_class": BinarySensorDeviceClass.SMOKE,
-        "name": "烟雾检测",
-        "icon": "mdi:smoke-detector",
-        "model": "Smoke Sensor",
-    }],
-    54: [{
-        "state_key": "water_leak_detected",
-        "device_class": BinarySensorDeviceClass.MOISTURE,
-        "name": "水浸",
-        "icon": "mdi:water",
-        "model": "Water Leak Sensor",
-    }],
-    56: [{
-        "state_key": "emergency_state",
-        "device_class": BinarySensorDeviceClass.PROBLEM,
-        "name": "紧急按钮",
-        "icon": "mdi:alert-octagon",
-        "model": "Emergency Button",
-    }],
+    26: [
+        {
+            "state_key": "motion_detected",
+            "device_class": BinarySensorDeviceClass.MOTION,
+            "name": "人体检测",
+            "icon": "mdi:motion-sensor",
+            "model": "Motion Sensor",
+        }
+    ],
+    46: [
+        {
+            "state_key": "door_state",
+            "device_class": BinarySensorDeviceClass.DOOR,
+            "name": "门磁状态",
+            "icon": "mdi:door-open",
+            "model": "Door Window Sensor",
+        }
+    ],
+    25: [
+        {
+            "state_key": "gas_detected",
+            "device_class": BinarySensorDeviceClass.GAS,
+            "name": "燃气检测",
+            "icon": "mdi:gas-cylinder",
+            "model": "Gas Sensor",
+        }
+    ],
+    27: [
+        {
+            "state_key": "smoke_detected",
+            "device_class": BinarySensorDeviceClass.SMOKE,
+            "name": "烟雾检测",
+            "icon": "mdi:smoke-detector",
+            "model": "Smoke Sensor",
+        }
+    ],
+    54: [
+        {
+            "state_key": "water_leak_detected",
+            "device_class": BinarySensorDeviceClass.MOISTURE,
+            "name": "水浸",
+            "icon": "mdi:water",
+            "model": "Water Leak Sensor",
+        }
+    ],
+    56: [
+        {
+            "state_key": "emergency_state",
+            "device_class": BinarySensorDeviceClass.PROBLEM,
+            "name": "紧急按钮",
+            "icon": "mdi:alert-octagon",
+            "model": "Emergency Button",
+        }
+    ],
 }
 
 _BINARY_SENSOR_TYPES = set(_BINARY_SENSOR_FACTORIES.keys())
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
+    hass: HomeAssistant,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-):
+) -> None:
     """设置二元传感器实体。"""
-    coordinator: OrviboLanCoordinator = hass.data[DOMAIN][entry.entry_id]
+    from . import get_runtime_data
+
+    coordinator: OrviboLanCoordinator = get_runtime_data(hass, entry).coordinator
     from .selection import selected_device_ids
+
     selected_ids = selected_device_ids(entry.options, coordinator.devices)
     entities = []
 
@@ -133,18 +188,32 @@ async def async_setup_entry(
         if did not in selected_ids:
             continue
         dt = coordinator.device_types.get(did, 0)
-        if dt not in _BINARY_SENSOR_TYPES:
+        state = coordinator.get_device_state(did) or {}
+        if not supports_platform(device, state, "binary_sensor"):
             continue
 
-        for cfg in _BINARY_SENSOR_FACTORIES[dt]:
-            entities.append(OrviboLanBinarySensorBase(
-                coordinator, did, device,
-                state_key=cfg["state_key"],
-                device_class=cfg["device_class"],
-                name=cfg["name"],
-                icon=cfg["icon"],
-                model=cfg["model"],
-            ))
+        for cfg in _BINARY_SENSOR_FACTORIES.get(dt, []):
+            entities.append(
+                OrviboLanBinarySensorBase(
+                    coordinator,
+                    did,
+                    device,
+                    state_key=cfg["state_key"],
+                    device_class=cfg["device_class"],
+                    name=cfg["name"],
+                    icon=cfg["icon"],
+                    model=cfg["model"],
+                )
+            )
+
+        if PROPERTY_DOOR_STATUS in state_properties(state) and dt != 46:
+            entities.append(
+                OrviboLanPropertyDoorSensor(
+                    coordinator,
+                    did,
+                    device,
+                )
+            )
 
     if entities:
         async_add_entities(entities)
