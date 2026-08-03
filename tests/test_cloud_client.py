@@ -99,7 +99,7 @@ def oauth_payload() -> dict[str, object]:
 
 
 class CloudClientLoginTests(unittest.IsolatedAsyncioTestCase):
-    async def test_default_oauth_uses_safe_get_options(self) -> None:
+    async def test_default_oauth_uses_form_post(self) -> None:
         session = FakeSession(
             [
                 FakeResponse(oauth_payload()),
@@ -109,30 +109,70 @@ class CloudClientLoginTests(unittest.IsolatedAsyncioTestCase):
         client = CloudClient(session, "account@example.com", "password")
         await client.login()
         method, url, kwargs = session.calls[0]
-        self.assertEqual(method, "GET")
+        self.assertEqual(method, "POST")
         self.assertTrue(url.startswith("https://"))
         self.assertTrue(url.endswith("/getOauthToken"))
         self.assertNotIn("account@example.com", url)
         self.assertEqual(kwargs["allow_redirects"], False)
         self.assertIsInstance(kwargs["timeout"], aiohttp.ClientTimeout)
-        params = kwargs["params"]
-        self.assertIsInstance(params, Mapping)
-        self.assertEqual(params["userName"], "account@example.com")
-        self.assertEqual(len(params["password"]), 32)
+        self.assertNotIn("params", kwargs)
+        data = kwargs["data"]
+        self.assertIsInstance(data, Mapping)
+        self.assertEqual(data["userName"], "account@example.com")
+        self.assertEqual(len(data["password"]), 32)
 
-    async def test_explicit_post_oauth_uses_form_data(self) -> None:
+    async def test_explicit_get_oauth_retains_compatibility(self) -> None:
         session = FakeSession(
             [
                 FakeResponse(oauth_payload()),
                 FakeResponse({"code": 0, "data": []}),
             ]
         )
-        client = CloudClient(session, "account", "password", oauth_method="POST")
+        client = CloudClient(session, "account", "password", oauth_method="GET")
         await client.login()
         method, _, kwargs = session.calls[0]
-        self.assertEqual(method, "POST")
-        self.assertIn("data", kwargs)
-        self.assertNotIn("params", kwargs)
+        self.assertEqual(method, "GET")
+        self.assertIn("params", kwargs)
+        self.assertNotIn("data", kwargs)
+
+    async def test_default_oauth_retries_get_when_post_response_is_incompatible(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse({"status": 0, "data": None}),
+                FakeResponse(oauth_payload()),
+                FakeResponse({"code": 0, "data": {"familyInfo": []}}),
+                FakeResponse(oauth_payload()),
+                FakeResponse({"code": 0, "data": {"familyInfo": []}}),
+            ]
+        )
+        client = CloudClient(session, "account", "password")
+
+        await client.login()
+
+        self.assertEqual([call[0] for call in session.calls], ["POST", "GET", "POST"])
+        self.assertEqual(client.access_token, "secret-token")
+        self.assertEqual(client.user_id, "user-1")
+
+        await client.login()
+
+        self.assertEqual(
+            [call[0] for call in session.calls],
+            ["POST", "GET", "POST", "GET", "POST"],
+        )
+
+    async def test_default_oauth_retries_get_for_unsupported_form_post(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse({}, status=415),
+                FakeResponse(oauth_payload()),
+                FakeResponse({"code": 0, "data": {"familyInfo": []}}),
+            ]
+        )
+        client = CloudClient(session, "account", "password")
+
+        await client.login()
+
+        self.assertEqual([call[0] for call in session.calls], ["POST", "GET", "POST"])
 
     async def test_login_parses_families_and_selects_first(self) -> None:
         family = {"familyId": "family-1", "familyName": "Home"}
@@ -167,18 +207,25 @@ class CloudClientErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.released)
 
     async def test_invalid_json_raises_explicit_error(self) -> None:
-        response = FakeResponse(json_error=ValueError("bad"))
-        client = CloudClient(FakeSession([response]), "a", "p")
+        responses = [
+            FakeResponse(json_error=ValueError("bad post")),
+            FakeResponse(json_error=ValueError("bad get")),
+        ]
+        session = FakeSession(responses)
+        client = CloudClient(session, "a", "p")
         with self.assertRaises(CloudJsonError):
             await client.login()
-        self.assertTrue(response.released)
+        self.assertTrue(all(response.released for response in responses))
+        self.assertEqual([call[0] for call in session.calls], ["POST", "GET"])
 
     async def test_non_object_json_raises_schema_error(self) -> None:
-        response = FakeResponse([])
-        client = CloudClient(FakeSession([response]), "a", "p")
+        responses = [FakeResponse([]), FakeResponse([])]
+        session = FakeSession(responses)
+        client = CloudClient(session, "a", "p")
         with self.assertRaises(CloudSchemaError):
             await client.login()
-        self.assertTrue(response.released)
+        self.assertTrue(all(response.released for response in responses))
+        self.assertEqual([call[0] for call in session.calls], ["POST", "GET"])
 
     async def test_readtable_api_error_is_explicit(self) -> None:
         client = CloudClient(
@@ -218,6 +265,8 @@ class CloudClientErrorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CloudTransportError) as raised:
             await client.login()
 
+        self.assertEqual([call[0] for call in session.calls], ["POST"])
+
         rendered_error = "".join(
             traceback.format_exception(
                 type(raised.exception),
@@ -231,6 +280,7 @@ class CloudClientErrorTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(cloud_client._LOGGER, "debug") as debug:
             self.assertFalse(await client.ensure_login())
+        self.assertEqual([call[0] for call in session.calls], ["POST", "POST"])
         rendered_log = " ".join(str(value) for call in debug.call_args_list for value in call.args)
         for secret in secrets:
             self.assertNotIn(secret, rendered_log)
@@ -263,7 +313,7 @@ class CloudClientDeviceTests(unittest.IsolatedAsyncioTestCase):
         devices, *_ = await client.fetch_devices()
 
         self.assertEqual(devices, [])
-        self.assertEqual([call[0] for call in session.calls], ["POST", "GET", "POST", "POST"])
+        self.assertEqual([call[0] for call in session.calls], ["POST", "POST", "POST", "POST"])
 
     async def test_fetch_devices_preserves_six_item_contract(self) -> None:
         payload = {

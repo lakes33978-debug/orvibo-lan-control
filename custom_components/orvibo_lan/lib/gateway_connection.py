@@ -12,6 +12,7 @@ from contextlib import suppress
 from typing import Any
 
 from ..exceptions import InvalidLengthError, InvalidMagicError, OrviboLanError, ProtocolError
+from ..privacy import mask_host, mask_identifier
 from .packet import (
     CMD_HEARTBEAT,
     CMD_HELLO,
@@ -50,6 +51,10 @@ OpenConnection = Callable[
 
 class GatewayConnectionError(OrviboLanError):
     """Raised when a gateway connection cannot complete an operation."""
+
+    def __init__(self, message: str, *, reason: str = "connection_error") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class GatewayDisconnectedError(GatewayConnectionError):
@@ -148,7 +153,8 @@ class GatewayConnection:
         except asyncio.TimeoutError as error:
             await self._close_if_generation_changed(start_generation)
             raise GatewayRequestTimeoutError(
-                f"gateway connect timed out after {timeout:g}s"
+                f"gateway connect timed out after {timeout:g}s",
+                reason="connect_timeout",
             ) from error
         except BaseException:
             await self._close_if_generation_changed(start_generation)
@@ -188,7 +194,7 @@ class GatewayConnection:
             self._keys = {ID_UNSET: DEFAULT_KEY}
             self._reader_task = asyncio.create_task(
                 self._reader_loop(generation, reader, writer),
-                name=f"orvibo-reader-{self.host}-{generation}",
+                name=f"orvibo-reader-{mask_identifier(self.host)}-{generation}",
             )
 
             hello = await self.request(
@@ -201,8 +207,16 @@ class GatewayConnection:
             session_id = self._response_session_id(hello)
             raw_key = hello.get("sessionKey") or hello.get("key")
             if session_id is None or raw_key is None:
-                raise GatewayConnectionError("hello response omitted session credentials")
+                raise GatewayConnectionError(
+                    "hello response omitted session credentials",
+                    reason="hello_credentials_missing",
+                )
             hello_uid = self._extract_uid(hello)
+            if expected_uid is not None and hello_uid is not None and hello_uid != expected_uid:
+                raise GatewayConnectionError(
+                    "gateway hello did not confirm expected UID",
+                    reason="hello_uid_mismatch",
+                )
             self.session_key = self._decode_session_key(raw_key)
             self.session_id = session_id
             self._keys[session_id] = self.session_key
@@ -225,7 +239,10 @@ class GatewayConnection:
 
             login_uid = self._extract_uid(login)
             if hello_uid and login_uid and hello_uid != login_uid:
-                raise GatewayConnectionError("gateway handshake returned conflicting UIDs")
+                raise GatewayConnectionError(
+                    "gateway handshake returned conflicting UIDs",
+                    reason="handshake_uid_conflict",
+                )
             self.peer_uid = login_uid or hello_uid
             self.identity_confirmed = bool(
                 expected_uid is not None and self.peer_uid == expected_uid
@@ -235,15 +252,32 @@ class GatewayConnection:
                 and not self.identity_confirmed
                 and not (allow_missing_uid and self.peer_uid is None)
             ):
+                reason = (
+                    "identity_missing"
+                    if self.peer_uid is None
+                    else "handshake_uid_mismatch"
+                )
                 raise GatewayConnectionError(
-                    "gateway handshake did not confirm expected UID "
-                    f"(expected={expected_uid!r}, peer={self.peer_uid!r})"
+                    "gateway handshake did not confirm expected UID",
+                    reason=reason,
+                )
+            if expected_uid is not None and self.peer_uid is None:
+                _LOGGER.warning(
+                    "Gateway %s did not return an identity; using the cloud-provided endpoint",
+                    mask_host(self.host),
                 )
 
             self._ready = True
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(generation),
-                name=f"orvibo-heartbeat-{self.host}-{generation}",
+                name=f"orvibo-heartbeat-{mask_identifier(self.host)}-{generation}",
+            )
+            _LOGGER.debug(
+                "Gateway connection ready for %s (generation=%s, identity_confirmed=%s, pushes=%s)",
+                mask_host(self.host),
+                generation,
+                self.identity_confirmed,
+                self._push_callback is not None,
             )
 
     async def request(
@@ -274,7 +308,8 @@ class GatewayConnection:
             )
         except asyncio.TimeoutError as error:
             raise GatewayRequestTimeoutError(
-                f"gateway request timed out after {deadline:g}s"
+                f"gateway request timed out after {deadline:g}s",
+                reason="request_timeout",
             ) from error
 
     async def _request_with_guard(
@@ -311,7 +346,10 @@ class GatewayConnection:
         session_id: bytes | None,
     ) -> Payload:
         if not self._transport_active:
-            raise GatewayDisconnectedError("gateway is not connected")
+            raise GatewayDisconnectedError(
+                "gateway is not connected",
+                reason="transport_not_connected",
+            )
 
         generation = self.generation
         request = dict(payload)
@@ -326,7 +364,10 @@ class GatewayConnection:
         for route in routes:
             existing = self._pending.get(route)
             if existing is not None and not existing.done():
-                raise GatewayConnectionError(f"duplicate request correlation: {route!r}")
+                raise GatewayConnectionError(
+                    f"duplicate request correlation: {route!r}",
+                    reason="correlation_collision",
+                )
             self._pending[route] = future
         if not reliable:
             self._single_pending = future
@@ -356,7 +397,10 @@ class GatewayConnection:
         timeout: float | None = None,
     ) -> Payload:
         if not self.connected:
-            raise GatewayDisconnectedError("gateway login is not complete")
+            raise GatewayDisconnectedError(
+                "gateway login is not complete",
+                reason="login_incomplete",
+            )
         return await self.request(payload, timeout=timeout)
 
     async def close(self) -> None:
@@ -377,7 +421,12 @@ class GatewayConnection:
             self._reader_task = None
             self.writer = None
             self.reader = None
-            self._fail_pending(GatewayDisconnectedError("gateway connection closed"))
+            self._fail_pending(
+                GatewayDisconnectedError(
+                    "gateway connection closed",
+                    reason="connection_closed",
+                )
+            )
 
         for task in tasks:
             if task is not None and task is not current and not task.done():
@@ -397,7 +446,10 @@ class GatewayConnection:
         async with self._write_lock:
             writer = self.writer
             if writer is None or self._closed or generation != self.generation:
-                raise GatewayDisconnectedError("gateway transport is unavailable")
+                raise GatewayDisconnectedError(
+                    "gateway transport is unavailable",
+                    reason="transport_unavailable",
+                )
             try:
                 writer.write(packet)
                 await writer.drain()
@@ -406,10 +458,16 @@ class GatewayConnection:
                 self._disconnect_generation(
                     generation,
                     writer,
-                    GatewayDisconnectedError("gateway write failed"),
+                    GatewayDisconnectedError(
+                        "gateway write failed",
+                        reason="write_failed",
+                    ),
                 )
         if failure is not None:
-            raise GatewayDisconnectedError("gateway write failed") from failure
+            raise GatewayDisconnectedError(
+                "gateway write failed",
+                reason="write_failed",
+            ) from failure
 
     async def _reader_loop(
         self,
@@ -417,7 +475,6 @@ class GatewayConnection:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        failure: BaseException | None = None
         try:
             while generation == self.generation and not self._closed:
                 packet = await self._read_frame(reader)
@@ -433,14 +490,20 @@ class GatewayConnection:
             asyncio.IncompleteReadError,
             ProtocolError,
         ) as error:
-            failure = error
-            _LOGGER.debug("Gateway reader stopped for %s: %s", self.host, error)
+            _LOGGER.debug(
+                "Gateway reader stopped for %s (%s)",
+                mask_host(self.host),
+                type(error).__name__,
+            )
         finally:
             if generation == self.generation and not self._closed:
                 self._disconnect_generation(
                     generation,
                     writer,
-                    GatewayDisconnectedError(f"gateway reader stopped: {failure!s}"),
+                    GatewayDisconnectedError(
+                        "gateway reader stopped",
+                        reason="reader_stopped",
+                    ),
                 )
 
     def _disconnect_generation(
@@ -479,25 +542,76 @@ class GatewayConnection:
         return header + await reader.readexactly(length - 4)
 
     async def _route(self, payload: Payload) -> None:
-        if payload.get("cmd") == CMD_STATE_UPDATE:
-            if self._push_callback is not None:
-                try:
-                    result = self._push_callback(payload)
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception:
-                    _LOGGER.exception("Gateway push callback failed for %s", self.host)
-            return
-
+        command = self._command_value(payload.get("cmd"))
         response_routes = self._correlation_keys(payload)
         future = next(
             (self._pending[route] for route in response_routes if route in self._pending),
             None,
         )
-        if future is None and not response_routes:
-            future = self._single_pending
+        single_pending = self._single_pending if not response_routes else None
+
+        # Some firmware uses a non-standard command number for uncorrelated
+        # device updates. Those packets receive stricter gateway and field
+        # validation in the coordinator before they can affect entity state.
+        is_unsolicited_update = command == CMD_STATE_UPDATE or (
+            future is None and single_pending is None and self._has_device_id(payload)
+        )
+        if is_unsolicited_update:
+            _LOGGER.debug(
+                "Gateway %s received device update (cmd=%r, fields=%s)",
+                mask_host(self.host),
+                command,
+                tuple(sorted(str(key) for key in payload if not str(key).startswith("__"))),
+            )
+            if self._push_callback is not None:
+                try:
+                    result = self._push_callback(payload)
+                    if inspect.isawaitable(result):
+                        await result
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    _LOGGER.error(
+                        "Gateway push callback failed for %s (%s)",
+                        mask_host(self.host),
+                        type(error).__name__,
+                    )
+            else:
+                _LOGGER.debug(
+                    "Gateway %s dropped device update because pushes are disabled",
+                    mask_host(self.host),
+                )
+            return
+
+        if future is None:
+            future = single_pending
         if future is not None and not future.done():
             future.set_result(payload)
+
+    @staticmethod
+    def _command_value(value: Any) -> int | None:
+        """Normalize integer command fields without accepting booleans."""
+
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _has_device_id(payload: Mapping[str, Any]) -> bool:
+        """Identify unsolicited device updates without logging the identifier."""
+
+        for field in ("deviceId", "deviceID", "device_id"):
+            value = payload.get(field)
+            if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value):
+                return True
+        return False
 
     async def _heartbeat_loop(self, generation: int) -> None:
         try:
@@ -515,7 +629,12 @@ class GatewayConnection:
                 )
         except asyncio.CancelledError:
             raise
-        except GatewayConnectionError:
+        except GatewayConnectionError as error:
+            _LOGGER.debug(
+                "Gateway heartbeat failed for %s (reason=%s)",
+                mask_host(self.host),
+                error.reason,
+            )
             if generation == self.generation:
                 await self.close()
 
@@ -562,9 +681,15 @@ class GatewayConnection:
             except ValueError:
                 key = value.encode()
         else:
-            raise GatewayConnectionError("unsupported session key type")
+            raise GatewayConnectionError(
+                "unsupported session key type",
+                reason="session_key_type",
+            )
         if len(key) not in (16, 24, 32):
-            raise GatewayConnectionError("invalid session key length")
+            raise GatewayConnectionError(
+                "invalid session key length",
+                reason="session_key_length",
+            )
         return key
 
     @staticmethod

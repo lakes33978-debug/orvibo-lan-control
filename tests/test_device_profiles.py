@@ -10,7 +10,6 @@ from custom_components.orvibo_lan.device_profiles import (
     property_switch_state,
     verified_profile_name,
 )
-from custom_components.orvibo_lan.profiles import is_status_only_type
 from custom_components.orvibo_lan.lib import device_control
 from custom_components.orvibo_lan.lib.device_control import (
     fan_off,
@@ -18,6 +17,7 @@ from custom_components.orvibo_lan.lib.device_control import (
     fan_set_speed,
     power_only_light,
 )
+from custom_components.orvibo_lan.profiles import is_status_only_type
 
 
 def test_control_serials_are_unique_across_a_burst() -> None:
