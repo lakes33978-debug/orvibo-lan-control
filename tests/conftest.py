@@ -90,8 +90,14 @@ class FakeOptionsFlow:
     def async_show_form(self, **kwargs):
         return {"type": "form", **kwargs}
 
+    def async_show_menu(self, **kwargs):
+        return {"type": "menu", **kwargs}
+
     def async_create_entry(self, **kwargs):
         return {"type": "create_entry", **kwargs}
+
+    def async_abort(self, **kwargs):
+        return {"type": "abort", **kwargs}
 
 
 class FakeCoordinatorEntity:

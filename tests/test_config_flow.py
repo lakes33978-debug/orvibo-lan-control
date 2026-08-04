@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -72,6 +72,98 @@ def test_options_flow_keeps_config_entry_without_setting_read_only_property() ->
     flow = config_flow.OrviboLanConfigFlow.async_get_options_flow(entry)
 
     assert flow._config_entry is entry
+
+
+@pytest.mark.asyncio
+async def test_options_flow_menu_exposes_reauth_and_devices() -> None:
+    entry = SimpleNamespace(data={}, options={})
+    flow = config_flow.OrviboLanOptionsFlow(entry)
+
+    result = await flow.async_step_init()
+
+    assert result["type"] == "menu"
+    assert result["menu_options"] == ["reauth", "devices"]
+
+
+@pytest.mark.asyncio
+async def test_options_reauth_updates_same_entry_and_preserves_options() -> None:
+    entry = SimpleNamespace(
+        data={
+            CONF_USERNAME: "account",
+            CONF_PASSWORD: "old-password",
+            CONF_FAMILY_ID: "family-1",
+            "unrelated": "preserve-me",
+        },
+        options={CONF_SELECTED_DEVICE_IDS: ["device-1"]},
+    )
+    update_entry = MagicMock()
+    flow = config_flow.OrviboLanOptionsFlow(entry)
+    flow.hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_update_entry=update_entry)
+    )
+    original_options = dict(entry.options)
+
+    with (
+        patch.object(config_flow, "CloudClient", return_value=FakeCloudClient()),
+        patch.object(config_flow, "async_get_clientsession", return_value=object()),
+        patch.object(
+            config_flow,
+            "_load_devices",
+            new=AsyncMock(return_value=([], {"gateway-1": "192.168.1.2"})),
+        ),
+        patch.object(
+            config_flow,
+            "_probe_gateway_credentials",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        result = await flow.async_step_reauth({CONF_PASSWORD: "new-password"})
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    update_entry.assert_called_once()
+    assert update_entry.call_args.args[0] is entry
+    updated_data = update_entry.call_args.kwargs["data"]
+    assert updated_data[CONF_PASSWORD] == "new-password"
+    assert updated_data[CONF_FAMILY_ID] == "family-1"
+    assert updated_data["unrelated"] == "preserve-me"
+    assert entry.options == original_options
+
+
+@pytest.mark.asyncio
+async def test_options_reauth_rejection_does_not_modify_entry() -> None:
+    entry = SimpleNamespace(
+        data={
+            CONF_USERNAME: "account",
+            CONF_PASSWORD: "old-password",
+            CONF_FAMILY_ID: "family-1",
+        },
+        options={CONF_SELECTED_DEVICE_IDS: ["device-1"]},
+    )
+    update_entry = MagicMock()
+    flow = config_flow.OrviboLanOptionsFlow(entry)
+    flow.hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_update_entry=update_entry)
+    )
+
+    with (
+        patch.object(config_flow, "CloudClient", return_value=FakeCloudClient()),
+        patch.object(config_flow, "async_get_clientsession", return_value=object()),
+        patch.object(
+            config_flow,
+            "_load_devices",
+            new=AsyncMock(return_value=([], {"gateway-1": "192.168.1.2"})),
+        ),
+        patch.object(
+            config_flow,
+            "_probe_gateway_credentials",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        result = await flow.async_step_reauth({CONF_PASSWORD: "wrong"})
+
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "auth_failed"}
+    update_entry.assert_not_called()
 
 
 @pytest.mark.asyncio
