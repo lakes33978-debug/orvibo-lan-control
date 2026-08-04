@@ -85,6 +85,39 @@ async def _load_devices(
     return result, gateway_ips
 
 
+async def _probe_gateway_credentials(
+    username: str,
+    password: str,
+    gateway_ips: Mapping[str, str],
+) -> bool:
+    """Validate credentials against one available LAN gateway."""
+    if not gateway_ips:
+        return True
+    from .lib.gateway_connection import (
+        GatewayConnection,
+        GatewayLoginRejectedError,
+    )
+
+    uid, host = next(iter(gateway_ips.items()))
+    connection = GatewayConnection(str(host))
+    try:
+        await connection.connect(
+            username,
+            password,
+            expected_uid=str(uid),
+            allow_missing_uid=True,
+        )
+    except GatewayLoginRejectedError:
+        return False
+    except Exception:
+        # A timeout or temporarily unreachable gateway is not proof that the
+        # replacement password is invalid. Only explicit rejection fails it.
+        return True
+    finally:
+        await connection.close()
+    return True
+
+
 class OrviboLanConfigFlow(  # type: ignore[call-arg]
     config_entries.ConfigFlow,
     domain=DOMAIN,
@@ -298,29 +331,11 @@ class OrviboLanConfigFlow(  # type: ignore[call-arg]
         Only an explicit gateway rejection is treated as an auth failure;
         network or timeout errors do not block the configuration flow.
         """
-        if not gateway_ips:
-            return True
-        from .lib.gateway_connection import (
-            GatewayConnection,
-            GatewayLoginRejectedError,
+        return await _probe_gateway_credentials(
+            self._username,
+            self._password,
+            gateway_ips,
         )
-
-        uid, host = next(iter(gateway_ips.items()))
-        connection = GatewayConnection(str(host))
-        try:
-            await connection.connect(
-                self._username,
-                self._password,
-                expected_uid=str(uid),
-                allow_missing_uid=True,
-            )
-        except GatewayLoginRejectedError:
-            return False
-        except Exception:
-            return True
-        finally:
-            await connection.close()
-        return True
 
 
 class OrviboLanOptionsFlow(config_entries.OptionsFlow):
@@ -337,6 +352,67 @@ class OrviboLanOptionsFlow(config_entries.OptionsFlow):
         self,
         user_input: JsonObject | None = None,
     ) -> FlowResult:
+        """Show user-initiated account and device management actions."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["reauth", "devices"],
+        )
+
+    async def async_step_reauth(
+        self,
+        user_input: JsonObject | None = None,
+    ) -> FlowResult:
+        """Update the password without replacing the config entry."""
+        errors: dict[str, str] = {}
+        config_entry = self._config_entry
+        username = str(config_entry.data[CONF_USERNAME])
+
+        if user_input is not None:
+            password = str(user_input.get(CONF_PASSWORD) or "")
+            if not password:
+                errors["base"] = "empty_username_or_password"
+            else:
+                client = CloudClient(
+                    async_get_clientsession(self.hass),
+                    username,
+                    password,
+                    str(config_entry.data.get(CONF_FAMILY_ID) or "") or None,
+                )
+                try:
+                    await client.login()
+                    _devices, gateway_ips = await _load_devices(client)
+                except CloudAuthenticationError:
+                    errors["base"] = "auth_failed"
+                except CloudClientError:
+                    errors["base"] = "cannot_connect"
+                else:
+                    if not await _probe_gateway_credentials(
+                        username,
+                        password,
+                        gateway_ips,
+                    ):
+                        errors["base"] = "auth_failed"
+                    else:
+                        data = dict(config_entry.data)
+                        data[CONF_PASSWORD] = password
+                        self.hass.config_entries.async_update_entry(
+                            config_entry,
+                            data=data,
+                        )
+                        return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth",
+            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),
+            errors=errors,
+            description_placeholders={"username": username},
+        )
+
+    async def async_step_devices(
+        self,
+        user_input: JsonObject | None = None,
+    ) -> FlowResult:
+        """Select exposed devices using fresh cloud metadata."""
         errors: dict[str, str] = {}
         config_entry = self._config_entry
         if not self._devices:
@@ -368,7 +444,7 @@ class OrviboLanOptionsFlow(config_entries.OptionsFlow):
             (str(device["deviceId"]) for device in self._devices),
         )
         return self.async_show_form(
-            step_id="init",
+            step_id="devices",
             data_schema=_device_schema(self._devices, sorted(current)),
             errors=errors,
         )
