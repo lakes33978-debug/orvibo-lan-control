@@ -63,7 +63,7 @@ async def async_setup_entry(
                 dev_info["via_device"] = (DOMAIN, f"gateway_{uid}")
             self._attr_device_info = dev_info
 
-        def _curtain_props(self, st: dict) -> Optional[dict]:
+        def _curtain_props(self, st: dict) -> Optional[Mapping]:
             """梦幻帘(506)位置/角度在 properties.curtain（value1 固定 -1）。"""
             properties = st.get("properties")
             if not isinstance(properties, Mapping):
