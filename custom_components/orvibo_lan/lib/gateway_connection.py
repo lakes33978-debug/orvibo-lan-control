@@ -11,7 +11,16 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any
 
-from ..exceptions import InvalidLengthError, InvalidMagicError, OrviboLanError, ProtocolError
+from ..exceptions import (
+    EncryptionError,
+    InvalidCrcError,
+    InvalidLengthError,
+    InvalidMagicError,
+    InvalidPayloadError,
+    InvalidSessionError,
+    OrviboLanError,
+    ProtocolError,
+)
 from .packet import (
     CMD_HEARTBEAT,
     CMD_HELLO,
@@ -46,6 +55,9 @@ OpenConnection = Callable[
     [str, int],
     Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]],
 ]
+
+# 连续坏帧上限：超过即认为连接已不可信，主动断开等待重连。
+_MAX_CONSECUTIVE_BAD_FRAMES = 5
 
 
 class GatewayConnectionError(OrviboLanError):
@@ -417,11 +429,30 @@ class GatewayConnection:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        failure: BaseException | None = None
+        consecutive_bad_frames = 0
         try:
             while generation == self.generation and not self._closed:
                 packet = await self._read_frame(reader)
-                decoded = decode_packet(packet, self._keys)
+                try:
+                    decoded = decode_packet(packet, self._keys)
+                except (
+                    InvalidCrcError,
+                    InvalidSessionError,
+                    InvalidPayloadError,
+                    EncryptionError,
+                ) as error:
+                    # A frame decoded badly but the stream is still aligned;
+                    # skip it instead of killing the whole connection.
+                    consecutive_bad_frames += 1
+                    _LOGGER.debug(
+                        "Gateway reader skipping malformed frame for %s (%s)",
+                        self.host,
+                        type(error).__name__,
+                    )
+                    if consecutive_bad_frames >= _MAX_CONSECUTIVE_BAD_FRAMES:
+                        raise
+                    continue
+                consecutive_bad_frames = 0
                 payload = dict(decoded.payload)
                 payload["__session_id"] = decoded.session_id
                 await self._route(payload)
