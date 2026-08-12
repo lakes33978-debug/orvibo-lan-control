@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-12
+
+### Added
+
+- 网关自动重连：`GatewayManager` 启动连通性监控，断开后 5s 探测并按指数退避重连（封顶 60s）；网关断开/恢复时通过 `persistent_notification` 告警与消除。
+- 恢复戴妃网关（deviceType=510）支持：`_build_gateway_ip_map` 及配置流/灯平台/常量中的设备类型过滤改回 `in (114, 510)`，6 网关（3 MixPad + 3 戴妃）全部接入。
+- 恢复梦幻帘（deviceType=506）支持：cover 平台读取 `properties.curtain`（value1 固定 -1 哨兵值）、叶片角度换算、`SET_TILT_POSITION` 能力及 506 专用打开/关闭/停止/位置/角度命令。
+
+### Changed
+
+- `GatewayManager.close()` 等待已取消的监控任务结束，消除关闭时的 `Task was destroyed` 警告。
+
+### Fixed
+
+- 修复测试契约与发布脚本中的版本断言、import 排序问题。
+
 ## [0.4.0] - 2026-08-02
 
 ### Added
